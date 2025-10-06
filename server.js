@@ -1,70 +1,73 @@
-import express from "express";
-import fetch from "node-fetch";
-import dotenv from "dotenv";
-import cors from "cors";   
-
-dotenv.config();
+require('dotenv').config();
+const express = require('express');
+const { Shopify, ApiVersion } = require('@shopify/shopify-api');
 
 const app = express();
- 
-app.use(cors({
-  origin: 'https://himanshu-self.myshopify.com',  
-  methods: ['GET', 'POST'],
-}));
 
-const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
-const ACCESS_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
-const PORT = process.env.PORT || 3000;
+// Enable CORS
+app.use((req, res, next) => {
+  res.header('Access-Control-Allow-Origin', '*');
+  res.header('Access-Control-Allow-Methods', 'GET');
+  res.header('Access-Control-Allow-Headers', 'Content-Type');
+  next();
+});
 
-app.get("/inventory-proxy", async (req, res) => {
-  const variantId = req.query.variant_id;
-  const locationId = req.query.location_id;
-  console.log("Request:", variantId, locationId,SHOPIFY_STORE,ACCESS_TOKEN,PORT);
+// Initialize Shopify API client
+Shopify.Context.initialize({
+  API_KEY: process.env.SHOPIFY_API_KEY,
+  API_SECRET_KEY: process.env.SHOPIFY_API_SECRET,
+  SCOPES: ['read_inventory'],
+  HOST_NAME: process.env.HOST || 'location-inventary.onrender.com',
+  API_VERSION: ApiVersion.October23, // Use 2023-10 API version
+  IS_EMBEDDED_APP: false,
+});
 
-  if (!variantId || !locationId) {
-    return res.status(400).json({ error: "variant_id and location_id are required" });
+app.get('/inventory-proxy', async (req, res) => {
+  const { variant_id, location_id } = req.query;
+
+  if (!variant_id || !location_id) {
+    return res.status(400).json({ error: 'Missing variant_id or location_id' });
   }
 
-  const query = `
-  {
-    productVariant(id: "${variantId}") {
-      id
-      sku
-      inventoryItem {
-        inventoryLevels(first: 10, query: "location_id:${locationId}") {
-          edges {
-            node {
-              location { id name }
-              quantities(names: ["available"]) { name quantity }
+  try {
+    const client = new Shopify.Clients.Graphql(
+      process.env.SHOPIFY_STORE_DOMAIN,
+      process.env.SHOPIFY_ACCESS_TOKEN
+    );
+
+    // GraphQL query to fetch inventory level
+    const query = `
+      query ($variantId: ID!, $locationId: ID!) {
+        productVariant(id: "gid://shopify/ProductVariant/${variant_id}") {
+          inventoryItem {
+            inventoryLevels(first: 1, query: "location_id:${location_id}") {
+              edges {
+                node {
+                  quantities(names: ["available"]) {
+                    name
+                    quantity
+                  }
+                }
+              }
             }
           }
         }
       }
-    }
-  }`;
+    `;
 
-  try {
-    const response = await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-07/graphql.json`, {
-      method: "POST",
-      headers: {
-        "X-Shopify-Access-Token": ACCESS_TOKEN,
-        "Content-Type": "application/json",
+    const response = await client.query({
+      data: {
+        query,
+        variables: { variantId: `gid://shopify/ProductVariant/${variant_id}`, locationId: `gid://shopify/Location/${location_id}` },
       },
-      body: JSON.stringify({ query }),
     });
 
-    const json = await response.json();
-
-    if (json.errors) {
-      return res.status(500).json({ error: json.errors });
-    }
-
-    res.json(json.data.productVariant);
+    res.json(response.body.data);
   } catch (error) {
-    res.status(500).json({ error: error.message });
+    console.error('Shopify GraphQL error:', error.message, error.response?.errors);
+    res.status(500).json({ error: 'Failed to fetch inventory', details: error.message, graphqlErrors: error.response?.errors });
   }
 });
 
-app.listen(PORT, () => {
-  console.log(`Inventory proxy server running on port ${PORT}`);
-});
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
