@@ -9,7 +9,7 @@ const app = express();
 
 app.use(
   cors({
-    origin: "https://himanshu-self.myshopify.com/", 
+    origin: "*",
     methods: ["GET", "POST"],
   })
 );
