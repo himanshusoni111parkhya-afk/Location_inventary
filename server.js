@@ -1,73 +1,78 @@
-require('dotenv').config();
-const express = require('express');
-const { Shopify, ApiVersion } = require('@shopify/shopify-api');
+import express from "express";
+import fetch from "node-fetch";
+import dotenv from "dotenv";
+import cors from "cors";
+
+dotenv.config();
 
 const app = express();
 
-// Enable CORS
-app.use((req, res, next) => {
-  res.header('Access-Control-Allow-Origin', '*');
-  res.header('Access-Control-Allow-Methods', 'GET');
-  res.header('Access-Control-Allow-Headers', 'Content-Type');
-  next();
-});
+app.use(cors({
+  origin: 'https://himanshu-self.myshopify.com',
+  methods: ['GET', 'POST'],
+}));
 
-// Initialize Shopify API client
-Shopify.Context.initialize({
-  API_KEY: process.env.SHOPIFY_API_KEY,
-  API_SECRET_KEY: process.env.SHOPIFY_API_SECRET,
-  SCOPES: ['read_inventory'],
-  HOST_NAME: process.env.HOST || 'location-inventary.onrender.com',
-  API_VERSION: ApiVersion.October23, // Use 2023-10 API version
-  IS_EMBEDDED_APP: false,
-});
+const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
+const ACCESS_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
+const PORT = process.env.PORT || 3000;
 
-app.get('/inventory-proxy', async (req, res) => {
-  const { variant_id, location_id } = req.query;
+app.get("/inventory-proxy", async (req, res) => {
+  const variantId = req.query.variant_id;
+  const locationId = req.query.location_id;
 
-  if (!variant_id || !location_id) {
-    return res.status(400).json({ error: 'Missing variant_id or location_id' });
+  console.log("Request:", variantId, locationId, SHOPIFY_STORE, ACCESS_TOKEN, PORT);
+
+  if (!variantId || !locationId) {
+    return res.status(400).json({ error: "variant_id and location_id are required" });
   }
 
-  try {
-    const client = new Shopify.Clients.Graphql(
-      process.env.SHOPIFY_STORE_DOMAIN,
-      process.env.SHOPIFY_ACCESS_TOKEN
-    );
-
-    // GraphQL query to fetch inventory level
-    const query = `
-      query ($variantId: ID!, $locationId: ID!) {
-        productVariant(id: "gid://shopify/ProductVariant/${variant_id}") {
-          inventoryItem {
-            inventoryLevels(first: 1, query: "location_id:${location_id}") {
-              edges {
-                node {
-                  quantities(names: ["available"]) {
-                    name
-                    quantity
-                  }
+  const query = `
+    query getInventoryLevel($variantId: ID!, $locationId: ID!) {
+      productVariant(id: $variantId) {
+        inventoryItem {
+          inventoryLevels(first: 1, query: "location_id:${locationId}") {
+            edges {
+              node {
+                available
+                location {
+                  id
+                  name
                 }
               }
             }
           }
         }
       }
-    `;
+    }
+  `;
 
-    const response = await client.query({
-      data: {
-        query,
-        variables: { variantId: `gid://shopify/ProductVariant/${variant_id}`, locationId: `gid://shopify/Location/${location_id}` },
+  const variables = {
+    variantId: `gid://shopify/ProductVariant/${variantId}`,
+    locationId: `gid://shopify/Location/${locationId}`,
+  };
+
+  try {
+    const response = await fetch(`https://${SHOPIFY_STORE}/admin/api/2023-07/graphql.json`, {
+      method: "POST",
+      headers: {
+        "X-Shopify-Access-Token": ACCESS_TOKEN,
+        "Content-Type": "application/json",
       },
+      body: JSON.stringify({ query, variables }),
     });
 
-    res.json(response.body.data);
+    const jsonData = await response.json();
+
+    if (jsonData.errors) {
+      return res.status(500).json({ error: jsonData.errors });
+    }
+
+    res.json(jsonData.data.productVariant);
   } catch (error) {
-    console.error('Shopify GraphQL error:', error.message, error.response?.errors);
-    res.status(500).json({ error: 'Failed to fetch inventory', details: error.message, graphqlErrors: error.response?.errors });
+    res.status(500).json({ error: error.message });
   }
 });
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+app.listen(PORT, () => {
+  console.log(`Inventory proxy server running on port ${PORT}`);
+});
