@@ -17,89 +17,122 @@ app.use(
 const SHOPIFY_STORE = process.env.SHOPIFY_STORE;
 const ACCESS_TOKEN = process.env.SHOPIFY_ADMIN_TOKEN;
 const PORT = process.env.PORT || 3000;
-
+ 
 app.get("/inventory-proxy", async (req, res) => {
-  const variantId = req.query.variant_id;
+  const productId = req.query.product_id;
   const locationId = req.query.location_id;
 
-  if (!variantId || !locationId) {
-    return res
-      .status(400)
-      .json({ error: "variant_id and location_id are required" });
+  if (!productId || !locationId) {
+    return res.status(400).json({ error: "product_id and location_id are required" });
   }
 
-  // Build GraphQL query to fetch all inventory levels for the variant
-  const query = `
-    query {
-      productVariant(id: "gid://shopify/ProductVariant/${variantId}") {
-        id
-        title
-        inventoryItem {
-          id
-          inventoryLevels(first: 10) {
-            edges {
-              node {
-                id
-                location {
+  const productGID = `gid://shopify/Product/${productId}`;
+  let allVariants = [];
+  let hasNextPage = true;
+  let cursor = null;
+ 
+  try {
+    while (hasNextPage) {
+      const query = `
+        query getInventoryLevels($productId: ID!, $after: String) {
+          product(id: $productId) {
+            id
+            title
+            variants(first: 10, after: $after) {
+              edges {
+                cursor
+                node {
                   id
-                  name
+                  title
+                  inventoryItem {
+                    id
+                    inventoryLevels(first: 10) {
+                      edges {
+                        node {
+                          id
+                          location {
+                            id
+                            name
+                          }
+                          quantities(names: ["available"]) {
+                            name
+                            quantity
+                          }
+                        }
+                      }
+                    }
+                  }
                 }
-                quantities(names: ["available"]) {
-                  name
-                  quantity
-                }
+              }
+              pageInfo {
+                hasNextPage
+                endCursor
               }
             }
           }
         }
+      `;
+
+      const response = await fetch(
+        `https://${SHOPIFY_STORE}/admin/api/2023-07/graphql.json`,
+        {
+          method: "POST",
+          headers: {
+            "X-Shopify-Access-Token": ACCESS_TOKEN,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            query,
+            variables: {
+              productId: productGID,
+              after: cursor,
+            },
+          }),
+        }
+      );
+
+      const jsonData = await response.json();
+
+      if (jsonData.errors) {
+        return res.status(500).json({ error: jsonData.errors });
       }
+
+      const product = jsonData.data.product;
+      const variantEdges = product?.variants?.edges || [];
+
+      variantEdges.forEach((edge) => {
+        const variant = edge.node;
+        const inventoryLevels = variant.inventoryItem?.inventoryLevels?.edges || [];
+
+        // Filter inventory by requested location
+        const level = inventoryLevels.find((lvl) =>
+          lvl.node.location.id.endsWith(locationId)
+        );
+
+        if (level) {
+          allVariants.push({
+            variantId: variant.id,
+            variantTitle: variant.title,
+            locationId: level.node.location.id,
+            locationName: level.node.location.name,
+            availableQuantity: level.node.quantities[0]?.quantity ?? 0,
+            inventoryLevels:inventoryLevels,
+          });
+        }
+  
+      });
+
+
+
+      hasNextPage = product?.variants?.pageInfo?.hasNextPage;
+      cursor = product?.variants?.pageInfo?.endCursor;
     }
-  `;
-
-  try {
-    const response = await fetch(
-      `https://${SHOPIFY_STORE}/admin/api/2023-07/graphql.json`,
-      {
-        method: "POST",
-        headers: {
-          "X-Shopify-Access-Token": ACCESS_TOKEN,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({ query }),
-      }
-    );
-
-    const jsonData = await response.json();
-
-    if (jsonData.errors) {
-      return res.status(500).json({ error: jsonData.errors });
-    }
-
-    // Filter inventoryLevels by requested location
-    const edges =
-      jsonData.data.productVariant.inventoryItem.inventoryLevels.edges || [];
-
-    const inventoryLevel = edges.find((e) =>
-      e.node.location.id.endsWith(locationId)
-    );
-
-    if (!inventoryLevel) {
-      return res
-        .status(404)
-        .json({ error: "Inventory for this location not found" });
-    }
-
-    const availableQuantity =
-      inventoryLevel.node.quantities[0]?.quantity ?? 0;
 
     res.json({
-      variantId,
+      productId,
       locationId,
-      locationName: inventoryLevel.node.location.name,
-      availableQuantity,
-       inventoryLevels: {
-        edges
-      },
+      totalVariants: allVariants.length,
+      variants: allVariants,
     });
   } catch (error) {
     res.status(500).json({ error: error.message });
